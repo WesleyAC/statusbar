@@ -65,7 +65,7 @@ fn make_battery_block(battery_manager: &battery::Manager) -> Block {
         (battery::State::Unknown, Some(color)) => ("?", Some(color)),
         (battery::State::Unknown, None) => ("?", Some(COLOR_UNKNOWN.to_string())),
         (battery::State::Charging, _) => ("⚡", Some(COLOR_CHARGE.to_string())),
-        (battery::State::Full, _) => ("?", Some(COLOR_GOOD.to_string())),
+        (battery::State::Full, _) => ("", Some(COLOR_GOOD.to_string())),
         (_, color) => ("", color),
     };
     Block {
