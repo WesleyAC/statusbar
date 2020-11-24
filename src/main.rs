@@ -1,5 +1,4 @@
 use chrono::TimeZone as _;
-use nl80211::PrettyFormat as _;
 
 static COLOR_GOOD: &'static str = "#8fc029";
 static COLOR_BAD: &'static str = "#dc2566";
