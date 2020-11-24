@@ -118,6 +118,6 @@ fn main() {
         blocks.push(make_battery_block(&battery_manager));
 
         display_bar(blocks);
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(5));
     }
 }
