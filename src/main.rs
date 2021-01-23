@@ -1,4 +1,7 @@
+#![feature(duration_constants)]
 use chrono::TimeZone as _;
+
+mod config;
 
 static COLOR_GOOD: &'static str = "#8fc029";
 static COLOR_BAD: &'static str = "#dc2566";
@@ -37,6 +40,23 @@ fn get_battery_percentage(battery_manager: &battery::Manager) -> f32 {
     }
 
     (total_energy / total_full_energy).get::<battery::units::ratio::percent>()
+}
+
+// From https://github.com/nightscout/cgm-remote-monitor/blob/master/swagger.yaml
+// TODO: share this with cgmserver project
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Entry {
+    #[serde(rename = "type")]
+    type_: String,
+    date_string: String,
+    date: i64,
+    sgv: f64,
+    direction: String,
+    noise: f64,
+    filtered: f64,
+    unfiltered: f64,
+    rssi: f64,
 }
 
 fn get_battery_state(battery_manager: &battery::Manager) -> battery::State {
@@ -102,15 +122,98 @@ fn make_wifi_block(nl80211sock: &mut nl80211::Socket, name: String) -> Block {
     Block { full_text, color, separator: false }
 }
 
+// this code is very gross and should be refactored. i don't really care.
+fn make_cgm_block(cgm_data: std::sync::Arc<std::sync::Mutex<Option<Entry>>>) -> Block {
+    let cgm_data: Option<Entry> = cgm_data.lock().unwrap().clone();
+    let (full_text, color) = match cgm_data {
+        Some(cgm_data) => {
+            let cgm_age = (std::time::SystemTime::now()
+                     .duration_since(std::time::UNIX_EPOCH)
+                     .unwrap()
+                     .as_millis() - cgm_data.date as u128) / (1000 * 60);
+            (
+                format!(
+                    "CGM {}{} ({}m)",
+                    cgm_data.sgv,
+                    match cgm_data.direction.as_str() {
+                        "DoubleUp" => "⇈",
+                        "SingleUp" => "↑",
+                        "FortyFiveUp" => "➚",
+                        "Flat" => "→",
+                        "FortyFiveDown" => "➘",
+                        "SingleDown" => "↓",
+                        "DoubleDown" => "⇊",
+                        _ => "",
+                    },
+                    cgm_age
+                ),
+                Some(if cgm_age > 10 {
+                    COLOR_BAD
+                } else if cgm_data.sgv < 70.0 {
+                    COLOR_BAD
+                } else if cgm_data.sgv <= 160.0 {
+                    COLOR_GOOD
+                } else if cgm_data.sgv > 160.0 {
+                    COLOR_BAD
+                } else {
+                    COLOR_UNKNOWN
+                }.to_string())
+            )
+        },
+        None => (
+            "CGM unknown".to_string(),
+            Some(COLOR_UNKNOWN.to_string())
+        ),
+    };
+    Block {
+        full_text,
+        color,
+        separator: false,
+    }
+}
+
 fn main() {
     let battery_manager = battery::Manager::new().unwrap();
     let mut nl80211sock = nl80211::Socket::connect().unwrap();
+    let cgm_data = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let update_cgm_data = cgm_data.clone();
+
+    std::thread::spawn(move || {
+        loop {
+            let mut data = Vec::new();
+            let mut handle = curl::easy::Easy::new();
+            handle.url(config::CGMSERVER_URL).unwrap();
+            let mut headers = curl::easy::List::new();
+            headers.append(&format!("API-Secret: {}", config::CGMSERVER_API_SECRET)).unwrap();
+            handle.http_headers(headers).unwrap();
+
+            let transfer_ok = {
+                let mut transfer = handle.transfer();
+                transfer.write_function(|new_data| {
+                    data.extend_from_slice(new_data);
+                    Ok(new_data.len())
+                }).unwrap();
+                transfer.perform().is_ok()
+            };
+
+            if transfer_ok {
+                let entry: serde_json::Result<Entry> = serde_json::from_slice(&data);
+                if let Ok(entry) = entry {
+                    let mut cgm_data = update_cgm_data.lock().unwrap();
+                    *cgm_data = Some(entry);
+                }
+            }
+            // TODO: calculate how long to wait from datapoint age
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    });
 
     println!("{}", r#"{"version": 1}"#);
     println!("[");
 
     loop {
         let mut blocks = vec![];
+        blocks.push(make_cgm_block(cgm_data.clone()));
         blocks.push(make_time_block("TPE %H:%M", chrono_tz::Asia::Taipei));
         blocks.push(make_time_block("SFO %H:%M", chrono_tz::America::Los_Angeles));
         blocks.push(make_time_block("NYC %H:%M", chrono_tz::America::New_York));
