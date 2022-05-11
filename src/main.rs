@@ -29,17 +29,22 @@ fn make_time_block(format: &str, tz: chrono_tz::Tz) -> Block {
     }
 }
 
-fn get_battery_percentage(battery_manager: &battery::Manager) -> f32 {
+fn get_battery_percentages(battery_manager: &battery::Manager) -> (f32, f32) {
     let mut total_energy = battery::units::Energy::new::<battery::units::energy::watt_hour>(0.0);
     let mut total_full_energy = battery::units::Energy::new::<battery::units::energy::watt_hour>(0.0);
+    let mut total_design_energy = battery::units::Energy::new::<battery::units::energy::watt_hour>(0.0);
     for battery in battery_manager.batteries().unwrap() {
         if let Ok(battery) = battery {
             total_energy += battery.energy();
             total_full_energy += battery.energy_full();
+            total_design_energy += battery.energy_full_design();
         }
     }
 
-    (total_energy / total_full_energy).get::<battery::units::ratio::percent>()
+    let current_percentage = (total_energy / total_full_energy).get::<battery::units::ratio::percent>();
+    let design_percentage = (total_full_energy / total_design_energy).get::<battery::units::ratio::percent>();
+
+    (current_percentage, design_percentage)
 }
 
 // From https://github.com/nightscout/cgm-remote-monitor/blob/master/swagger.yaml
@@ -72,11 +77,11 @@ fn get_battery_state(battery_manager: &battery::Manager) -> battery::State {
     last_state
 }
 
-fn make_battery_block(battery_manager: &battery::Manager) -> Block {
-    let percentage = get_battery_percentage(&battery_manager);
+fn make_battery_blocks(battery_manager: &battery::Manager) -> Vec<Block> {
+    let (current_percentage, design_percentage) = get_battery_percentages(&battery_manager);
     let (state_char, color) = match (
         get_battery_state(&battery_manager),
-        if percentage < 15.0 {
+        if current_percentage < 15.0 {
             Some(COLOR_BAD.to_string())
         } else {
             None
@@ -88,11 +93,18 @@ fn make_battery_block(battery_manager: &battery::Manager) -> Block {
         (battery::State::Full, _) => ("", Some(COLOR_GOOD.to_string())),
         (_, color) => ("", color),
     };
-    Block {
-        full_text: format!("{}{:.1}%", state_char, percentage),
-        color,
-        separator: false,
-    }
+    vec![
+        Block {
+            full_text: format!("{}{:.1}%", state_char, current_percentage),
+            color,
+            separator: false,
+        },
+        Block {
+            full_text: format!("({:.0}%)", design_percentage),
+            color: None,
+            separator: false,
+        },
+    ]
 }
 
 fn get_if_name(
@@ -218,7 +230,7 @@ fn main() {
         blocks.push(make_time_block("SFO %H:%M", chrono_tz::America::Los_Angeles));
         blocks.push(make_time_block("NYC %H:%M", chrono_tz::America::New_York));
         blocks.push(make_wifi_block(&mut nl80211sock, "wlp3s0".to_string()));
-        blocks.push(make_battery_block(&battery_manager));
+        blocks.append(&mut make_battery_blocks(&battery_manager));
 
         display_bar(blocks);
         std::thread::sleep(std::time::Duration::from_secs(5));
